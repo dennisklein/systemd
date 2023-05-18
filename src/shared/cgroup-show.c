@@ -2,9 +2,11 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <limits.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "alloc-util.h"
 #include "bus-error.h"
@@ -15,7 +17,9 @@
 #include "escape.h"
 #include "fd-util.h"
 #include "format-util.h"
+#include "glyph-util.h"
 #include "hostname-util.h"
+#include "list.h"
 #include "locale-util.h"
 #include "macro.h"
 #include "nulstr-util.h"
@@ -28,6 +32,8 @@
 #include "terminal-util.h"
 #include "unit-name.h"
 #include "xattr-util.h"
+
+#define PID_MIN_COLUMNS 20
 
 /* remove duplicates from sorted pid array in-place */
 static inline unsigned uniq_pid_array(pid_t sorted_pids[], unsigned length) {
@@ -53,7 +59,157 @@ static inline unsigned uniq_pid_array(pid_t sorted_pids[], unsigned length) {
         return uniq - sorted_pids; /* new length */
 }
 
-static void show_pid_array(
+/* returns maximum of given integers */
+static inline unsigned long max(unsigned long a, long b) {
+        assert(a < LONG_MAX);
+
+        if ((long) a > b)
+                return a;
+        return b;
+}
+
+static inline int show_pid(
+                const char *prefix,
+                unsigned pid_width,
+                unsigned ppid_tree_depth,
+                const char *glyph,
+                pid_t pid,
+                size_t n_columns,
+                OutputFlags flags) {
+
+        int r;
+        _cleanup_free_ char *cmdline = NULL;
+
+        if (pid_width == 0)
+                pid_width = DECIMAL_STR_WIDTH(pid);
+
+        const unsigned row_prefix_width = ppid_tree_depth + pid_width + 3; /* something like "...├─1114784 " */
+        n_columns = (flags & OUTPUT_FULL_WIDTH) ? SIZE_MAX : max(PID_MIN_COLUMNS, n_columns - row_prefix_width);
+
+        r = get_process_cmdline(pid,
+                                n_columns,
+                                PROCESS_CMDLINE_COMM_FALLBACK | PROCESS_CMDLINE_USE_LOCALE,
+                                &cmdline);
+        if (r < 0)
+                return r;
+
+        printf("%s%s%s%s%*"PID_PRI" %s%s\n",
+               prefix,
+               (ppid_tree_depth > 0) ? ansi_grey() : "",
+               glyph,
+               (ppid_tree_depth > 0) ? "": ansi_grey(),
+               (int) pid_width,
+               pid,
+               strna(cmdline),
+               ansi_normal());
+
+        return 0;
+}
+
+struct PpidTreeNode {
+        pid_t pid;
+
+        LIST_FIELDS(struct PpidTreeNode, siblings);
+        LIST_HEAD(struct PpidTreeNode, children);
+        unsigned n_children;
+};
+
+/**
+ * recursively construct the ppid tree from equal-length pid/ppid arrays where
+ * a process' pid and ppid correspond to the same index in both arrays.
+ *
+ * - the parent arg is the last used node element from a sufficiently large
+ *   pre-allocated node array (it is known a priori that we need n_ppids tree nodes)
+ * - returns the last used node element
+ */
+static struct PpidTreeNode* construct_ppid_tree(
+                const pid_t pids[],
+                const pid_t ppids[],
+                size_t n_ppids,
+                struct PpidTreeNode *parent,
+                struct PpidTreeNode *last_preallocated) {
+
+        assert(pids);
+        assert(ppids); /* must contain as many elements as the pids array */
+        assert(parent);
+
+        struct PpidTreeNode *last = parent;
+        const pid_t *pid = pids;
+        FOREACH_ARRAY(ppid, ppids, n_ppids) {
+                if (*ppid == parent->pid) {
+                        /* take the next pre-allocated unused node */
+                        struct PpidTreeNode *child = last + 1;
+                        child->pid = *pid;
+
+                        /* have the parent learn about its new child :) */
+                        LIST_APPEND(siblings, parent->children, child);
+                        parent->n_children++;
+
+                        /* search subtree of current child */
+                        last = construct_ppid_tree(pids, ppids, n_ppids, child, last_preallocated);
+                }
+                pid++; /* loop over pid and ppid arrays in lock-step */
+
+                /* check if tree construction is complete */
+                if (last == last_preallocated)
+                        break;
+        }
+
+        return last; /* last used node */
+}
+
+static int show_ppid_tree(
+                struct PpidTreeNode *parent,
+                const char *prefix,
+                unsigned depth,
+                size_t n_columns,
+                OutputFlags flags,
+                bool more) {
+
+        assert(parent);
+
+        int r;
+        unsigned pid_width = 0;
+
+        /* right-align pids if this is a flat branch (no subtrees) */
+        if (parent->n_children > 1) {
+                bool is_flat_branch = true;
+                LIST_FOREACH(siblings, child, parent->children) {
+                        is_flat_branch = (child->n_children == 0);
+                        if (!is_flat_branch)
+                                break;
+                }
+                if (is_flat_branch)
+                        pid_width = DECIMAL_STR_WIDTH(LIST_FIND_TAIL(siblings, parent->children)->pid);
+        }
+
+        LIST_FOREACH_WITH_NEXT(siblings, child, next, parent->children) {
+                const char *glyph = special_glyph((next || more) ? SPECIAL_GLYPH_TREE_BRANCH
+                                                                 : SPECIAL_GLYPH_TREE_RIGHT);
+                r = show_pid(prefix, pid_width, depth, glyph, child->pid, n_columns, flags);
+                if (r < 0)
+                        return r;
+
+                if (child->children) {
+                        _cleanup_free_ char *subprefix = NULL;
+                        subprefix = strjoin(prefix,
+                                            (depth > 0) ? ansi_grey() : "",
+                                            special_glyph((next || more) ? SPECIAL_GLYPH_TREE_VERTICAL
+                                                                         : SPECIAL_GLYPH_TREE_SPACE),
+                                            (depth > 0) ? ansi_normal() : "");
+                        if (!subprefix)
+                                return -ENOMEM;
+
+                        r = show_ppid_tree(child, subprefix, depth + 2, n_columns, flags, false);
+                        if (r < 0)
+                                return r;
+                }
+        }
+
+        return 0;
+}
+
+static int show_pids(
                 pid_t pids[],
                 unsigned n_pids,
                 const char *prefix,
@@ -62,38 +218,71 @@ static void show_pid_array(
                 bool more,
                 OutputFlags flags) {
 
-        unsigned i, pid_width;
-
         if (n_pids == 0)
-                return;
+                return 0;
 
+        int r;
+
+        /* sort and deduplicate pid array */
         typesafe_qsort(pids, n_pids, pid_compare_func);
-
         n_pids = uniq_pid_array(pids, n_pids);
-        pid_width = DECIMAL_STR_WIDTH(pids[n_pids - 1]);
 
-        if (flags & OUTPUT_FULL_WIDTH)
-                n_columns = SIZE_MAX;
-        else {
-                if (n_columns > pid_width + 3) /* something like "├─1114784 " */
-                        n_columns -= pid_width + 3;
-                else
-                        n_columns = 20;
+        if ((n_pids > 1) && (flags & OUTPUT_PPID_TREE) && !extra) {
+                /* print the ppid tree */
+
+                size_t n_ppids = n_pids;
+                _cleanup_free_ pid_t *ppids = NULL;
+                ppids = new(pid_t, n_ppids);
+                if (!ppids)
+                        return -ENOMEM;
+
+                /* query parent pids, virtual tree root is pid 0 */
+                pid_t *ppid = ppids;
+                FOREACH_ARRAY(pid, pids, n_pids) {
+                        r = get_process_ppid(*pid, ppid);
+                        if (r < 0)
+                                *ppid = 0;
+
+                        /* check if parent process is member of the given pids array */
+                        void* found = typesafe_bsearch(ppid, pids, n_pids, pid_compare_func);
+                        if (!found)
+                                *ppid = 0;
+
+                        ppid++;
+                }
+
+                /* pre-allocate all tree nodes at once */
+                size_t n_tree_nodes = n_pids + 1;
+                _cleanup_free_ struct PpidTreeNode *root = NULL;
+                root = new0(struct PpidTreeNode, n_tree_nodes);
+                if (!root)
+                        return -ENOMEM;
+
+                /* construct tree from pid/ppid arrays */
+                struct PpidTreeNode* last = construct_ppid_tree(pids, ppids, n_ppids, root, (root + n_tree_nodes - 1));
+                assert(last == (root + n_tree_nodes - 1));
+
+                /* print by traversing depth-first */
+                r = show_ppid_tree(root, prefix, 0, n_columns, flags, more);
+                if (r < 0)
+                        return r;
+        } else {
+                /* print flat list */
+
+                pid_t * const last_pid = pids + (n_pids - 1);
+                const unsigned pid_width = DECIMAL_STR_WIDTH(*last_pid);
+
+                FOREACH_ARRAY(pid, pids, n_pids) {
+                        const char *glyph = extra ? special_glyph(SPECIAL_GLYPH_TRIANGULAR_BULLET)
+                                                  : special_glyph((more || pid != last_pid) ? SPECIAL_GLYPH_TREE_BRANCH
+                                                                                            : SPECIAL_GLYPH_TREE_RIGHT);
+                        r = show_pid(prefix, pid_width, 0, glyph, *pid, n_columns, flags);
+                        if (r < 0)
+                                return r;
+                }
         }
-        for (i = 0; i < n_pids; i++) {
-                _cleanup_free_ char *t = NULL;
 
-                (void) get_process_cmdline(pids[i], n_columns,
-                                           PROCESS_CMDLINE_COMM_FALLBACK | PROCESS_CMDLINE_USE_LOCALE,
-                                           &t);
-
-                if (extra)
-                        printf("%s%s ", prefix, special_glyph(SPECIAL_GLYPH_TRIANGULAR_BULLET));
-                else
-                        printf("%s%s", prefix, special_glyph(((more || i < n_pids-1) ? SPECIAL_GLYPH_TREE_BRANCH : SPECIAL_GLYPH_TREE_RIGHT)));
-
-                printf("%s%*"PID_PRI" %s%s\n", ansi_grey(), (int) pid_width, pids[i], strna(t), ansi_normal());
-        }
+        return 0;
 }
 
 static int show_cgroup_one_by_path(
@@ -141,9 +330,7 @@ static int show_cgroup_one_by_path(
                 pids[n++] = pid;
         }
 
-        show_pid_array(pids, n, prefix, n_columns, false, more, flags);
-
-        return 0;
+        return show_pids(pids, n, prefix, n_columns, false, more, flags);
 }
 
 static int is_delegated(int cgfd, const char *path) {
@@ -408,9 +595,7 @@ static int show_extra_pids(
                 copy[j++] = pids[i];
         }
 
-        show_pid_array(copy, j, prefix, n_columns, true, false, flags);
-
-        return 0;
+        return show_pids(copy, j, prefix, n_columns, true, false, flags);
 }
 
 int show_cgroup_and_extra(

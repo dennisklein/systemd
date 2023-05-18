@@ -59,6 +59,7 @@ static int help(void) {
                "  -l --full           Do not ellipsize output\n"
                "  -k                  Include kernel threads in output\n"
                "  -M --machine=NAME   Show container NAME\n"
+               "     --ppid-tree      Show parent process id hierarchies\n"
                "\nSee the %s for details.\n",
                program_invocation_short_name,
                link);
@@ -72,6 +73,7 @@ static int parse_argv(int argc, char *argv[]) {
                 ARG_NO_PAGER = 0x100,
                 ARG_VERSION,
                 ARG_USER_UNIT,
+                ARG_PPID_TREE,
         };
 
         static const struct option options[] = {
@@ -85,6 +87,7 @@ static int parse_argv(int argc, char *argv[]) {
                 { "user-unit", optional_argument, NULL, ARG_USER_UNIT },
                 { "xattr",     required_argument, NULL, 'x'           },
                 { "cgroup-id", required_argument, NULL, 'c'           },
+                { "ppid-tree", no_argument,       NULL, ARG_PPID_TREE },
                 {}
         };
 
@@ -164,6 +167,10 @@ static int parse_argv(int argc, char *argv[]) {
                                 r = true;
 
                         SET_FLAG(arg_output_flags, OUTPUT_CGROUP_ID, r);
+                        break;
+
+                case ARG_PPID_TREE:
+                        arg_output_flags |= OUTPUT_PPID_TREE;
                         break;
 
                 case '?':
