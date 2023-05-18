@@ -29,6 +29,30 @@
 #include "unit-name.h"
 #include "xattr-util.h"
 
+/* remove duplicates from sorted pid array in-place */
+static inline unsigned uniq_pid_array(pid_t sorted_pids[], unsigned length) {
+        assert(sorted_pids);
+        if (length < 2)
+                return length;
+
+        pid_t * const last = sorted_pids + (length - 1);
+        /* create a new unique pid array in-place */
+        pid_t *uniq = sorted_pids;
+
+        FOREACH_ARRAY(pid, sorted_pids, length - 1) {
+                if (*pid != *(pid + 1)) {
+                        /* append the last pid of non-unique streak */
+                        *uniq = *pid;
+                        uniq++;
+                }
+        }
+        /* last pid at end of non-unique streak by definition */
+        *uniq = *last;
+        uniq++;
+
+        return uniq - sorted_pids; /* new length */
+}
+
 static void show_pid_array(
                 pid_t pids[],
                 unsigned n_pids,
@@ -38,21 +62,15 @@ static void show_pid_array(
                 bool more,
                 OutputFlags flags) {
 
-        unsigned i, j, pid_width;
+        unsigned i, pid_width;
 
         if (n_pids == 0)
                 return;
 
         typesafe_qsort(pids, n_pids, pid_compare_func);
 
-        /* Filter duplicates */
-        for (j = 0, i = 1; i < n_pids; i++) {
-                if (pids[i] == pids[j])
-                        continue;
-                pids[++j] = pids[i];
-        }
-        n_pids = j + 1;
-        pid_width = DECIMAL_STR_WIDTH(pids[j]);
+        n_pids = uniq_pid_array(pids, n_pids);
+        pid_width = DECIMAL_STR_WIDTH(pids[n_pids - 1]);
 
         if (flags & OUTPUT_FULL_WIDTH)
                 n_columns = SIZE_MAX;
