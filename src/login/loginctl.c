@@ -51,15 +51,16 @@ static char *arg_host = NULL;
 static bool arg_ask_password = true;
 static unsigned arg_lines = 10;
 static OutputMode arg_output = OUTPUT_SHORT;
+static bool arg_ppid_tree = false;
 
 STATIC_DESTRUCTOR_REGISTER(arg_property, strv_freep);
 
 static OutputFlags get_output_flags(void) {
-
         return
                 FLAGS_SET(arg_print_flags, BUS_PRINT_PROPERTY_SHOW_EMPTY) * OUTPUT_SHOW_ALL |
                 (arg_full || !on_tty() || pager_have()) * OUTPUT_FULL_WIDTH |
-                colors_enabled() * OUTPUT_COLOR;
+                colors_enabled() * OUTPUT_COLOR |
+                arg_ppid_tree * OUTPUT_PPID_TREE;
 }
 
 static int get_session_path(sd_bus *bus, const char *session_id, sd_bus_error *error, char **path) {
@@ -1314,6 +1315,7 @@ static int help(int argc, char *argv[], void *userdata) {
                "                             short-monotonic, short-unix, short-delta,\n"
                "                             json, json-pretty, json-sse, json-seq, cat,\n"
                "                             verbose, export, with-unit)\n"
+               "     --ppid-tree           Show parent process id hierarchies\n"
                "\nSee the %s for details.\n",
                program_invocation_short_name,
                ansi_highlight(),
@@ -1331,6 +1333,7 @@ static int parse_argv(int argc, char *argv[]) {
                 ARG_NO_LEGEND,
                 ARG_KILL_WHOM,
                 ARG_NO_ASK_PASSWORD,
+                ARG_PPID_TREE,
         };
 
         static const struct option options[] = {
@@ -1349,6 +1352,7 @@ static int parse_argv(int argc, char *argv[]) {
                 { "no-ask-password", no_argument,       NULL, ARG_NO_ASK_PASSWORD },
                 { "lines",           required_argument, NULL, 'n'                 },
                 { "output",          required_argument, NULL, 'o'                 },
+                { "ppid-tree",       no_argument,       NULL, ARG_PPID_TREE       },
                 {}
         };
 
@@ -1446,6 +1450,10 @@ static int parse_argv(int argc, char *argv[]) {
                 case 'M':
                         arg_transport = BUS_TRANSPORT_MACHINE;
                         arg_host = optarg;
+                        break;
+
+                case ARG_PPID_TREE:
+                        arg_ppid_tree = true;
                         break;
 
                 case '?':
