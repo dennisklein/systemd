@@ -25,6 +25,7 @@
 #include "memory-util.h"
 #include "numa-util.h"
 #include "open-file.h"
+#include "output-mode.h"
 #include "parse-util.h"
 #include "path-util.h"
 #include "pretty-print.h"
@@ -47,7 +48,8 @@ static OutputFlags get_output_flags(void) {
                 FLAGS_SET(arg_print_flags, BUS_PRINT_PROPERTY_SHOW_EMPTY) * OUTPUT_SHOW_ALL |
                 (arg_full || !on_tty() || pager_have()) * OUTPUT_FULL_WIDTH |
                 colors_enabled() * OUTPUT_COLOR |
-                !arg_quiet * OUTPUT_WARN_CUTOFF;
+                !arg_quiet * OUTPUT_WARN_CUTOFF |
+                arg_ppid_tree * OUTPUT_PPID_TREE;
 }
 
 typedef struct ExecStatusInfo {

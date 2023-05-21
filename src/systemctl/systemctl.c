@@ -122,6 +122,7 @@ bool arg_mkdir = false;
 bool arg_marked = false;
 const char *arg_drop_in = NULL;
 ImagePolicy *arg_image_policy = NULL;
+bool arg_ppid_tree = false;
 
 STATIC_DESTRUCTOR_REGISTER(arg_types, strv_freep);
 STATIC_DESTRUCTOR_REGISTER(arg_states, strv_freep);
@@ -329,6 +330,7 @@ static int systemctl_help(void) {
                "     --drop-in=NAME      Edit unit files using the specified drop-in file name\n"
                "     --when=TIME         Schedule halt/power-off/reboot/kexec action after\n"
                "                         a certain timestamp\n"
+               "     --ppid-tree         Show parent process id hierarchies\n"
                "\nSee the %2$s for details.\n",
                program_invocation_short_name,
                link,
@@ -455,6 +457,7 @@ static int systemctl_parse_argv(int argc, char *argv[]) {
                 ARG_NO_WARN,
                 ARG_DROP_IN,
                 ARG_WHEN,
+                ARG_PPID_TREE,
         };
 
         static const struct option options[] = {
@@ -521,6 +524,7 @@ static int systemctl_parse_argv(int argc, char *argv[]) {
                 { "marked",              no_argument,       NULL, ARG_MARKED              },
                 { "drop-in",             required_argument, NULL, ARG_DROP_IN             },
                 { "when",                required_argument, NULL, ARG_WHEN                },
+                { "ppid-tree",           no_argument,       NULL, ARG_PPID_TREE           },
                 {}
         };
 
@@ -1014,6 +1018,10 @@ static int systemctl_parse_argv(int argc, char *argv[]) {
                                 return log_error_errno(SYNTHETIC_ERRNO(EINVAL),
                                                        "Invalid timestamp '%s' specified for --when=.", optarg);
 
+                        break;
+
+                case ARG_PPID_TREE:
+                        arg_ppid_tree = true;
                         break;
 
                 case '.':
